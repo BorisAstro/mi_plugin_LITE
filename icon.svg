@@ -1,6 +1,12 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">
-  <rect x="2" y="2" width="20" height="20" rx="4" fill="#2d7d46"/>
-  <path d="M7 16 L12 6 L17 16 Z" fill="#ffffff"/>
-  <circle cx="12" cy="17" r="1.6" fill="#ffffff"/>
+  <defs>
+    <linearGradient id="silver" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#f2f2f2"/>
+      <stop offset="100%" stop-color="#9a9a9a"/>
+    </linearGradient>
+  </defs>
+  <rect x="2" y="2" width="20" height="20" rx="4" fill="url(#silver)"/>
+  <text x="12" y="17" font-family="Arial, sans-serif" font-size="13" font-weight="bold"
+        text-anchor="middle" fill="#3a3a3a">L</text>
 </svg>
