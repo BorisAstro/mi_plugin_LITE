@@ -1,0 +1,17 @@
+[general]
+name=Mi Plugin Lite
+qgisMinimumVersion=3.40
+qgisMaximumVersion=4.99
+supportsQt6=True
+description=Suite autocontenida de 19 scripts geoespaciales con entradas por interfaz — QGIS 4.0 / Qt6
+about=Diálogo de pestañas; cada una recoge sus selecciones y ejecuta un código Python independiente del subpaquete 'procesos'.
+version=1.0.1
+author=Boris Fernandez
+email=tu-correo@example.com
+tracker=https://github.com/BorisAstro/mi_plugin_LITE/issues
+repository=https://github.com/BorisAstro/mi_plugin_LITE
+homepage=
+category=Plugins
+icon=icon.svg
+experimental=False
+deprecated=False
