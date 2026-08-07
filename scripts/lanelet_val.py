@@ -21,6 +21,8 @@ from qgis.core import (
     QgsRendererCategory,
     QgsSymbol,
     QgsVectorLayer,
+    QgsSimpleLineSymbolLayer,
+    QgsUnitTypes,
 )
 from qgis.PyQt.QtCore import QMetaType
 from qgis.PyQt.QtGui import QColor
@@ -38,6 +40,10 @@ if "BUFFER_DIST" not in globals():
     BUFFER_DIST = 2.0        # buffer alrededor del lanelet
 if "DIST_TOLERANCE" not in globals():
     DIST_TOLERANCE = 2.0     # distancia máxima considerada correcta
+if "GROSOR_MM" not in globals():
+    GROSOR_MM = 1.6          # grosor de linea de la capa de validacion
+if "SOLO_FALLAS" not in globals():
+    SOLO_FALLAS = True       # la capa de salida solo lleva LEFT/RIGHT/BOTH_FAIL
 if "OUTPUT_TXT" not in globals():
     OUTPUT_TXT = None        # vacío = junto al archivo de la capa LANELET
 
@@ -157,6 +163,11 @@ for feat in lanelet_layer.getFeatures():
         status = "BOTH_FAIL"
     conteo[status] += 1
 
+    # los OK se cuentan igual para el reporte, pero se dejan fuera de la capa:
+    # dibujados encima tapan las fallas que se quieren revisar
+    if SOLO_FALLAS and status == "OK":
+        continue
+
     new_feat = QgsFeature(out_fields)
     new_feat.setGeometry(geom)
     new_feat.setAttributes(list(feat.attributes())
@@ -168,13 +179,28 @@ QgsProject.instance().addMapLayer(mem_layer)
 
 # ------------------------------ simbología ---------------------------------
 colores = [("OK", QColor(0, 180, 0), "OK ambos lados"),
-           ("LEFT_FAIL", QColor(255, 200, 0), "Falla lado izquierdo"),
-           ("RIGHT_FAIL", QColor(0, 150, 255), "Falla lado derecho"),
-           ("BOTH_FAIL", QColor(220, 0, 0), "Falla ambos lados")]
+           ("LEFT_FAIL", QColor(255, 170, 0), "Falla lado izquierdo"),
+           ("RIGHT_FAIL", QColor(0, 130, 255), "Falla lado derecho"),
+           ("BOTH_FAIL", QColor(230, 0, 40), "Falla ambos lados")]
+if SOLO_FALLAS:
+    colores = [c for c in colores if c[0] != "OK"]
 categories = []
 for valor, color, etiqueta in colores:
     sym = QgsSymbol.defaultSymbol(mem_layer.geometryType())
     sym.setColor(color)
+    # las fallas son pocas entre miles de lanelets: se refuerzan con un halo
+    # oscuro debajo para que se distingan sobre cualquier fondo
+    try:
+        capa_linea = sym.symbolLayer(0)
+        capa_linea.setWidth(GROSOR_MM)
+        capa_linea.setWidthUnit(QgsUnitTypes.RenderMillimeters)
+        halo = QgsSimpleLineSymbolLayer.create({})
+        halo.setColor(QColor(20, 20, 20, 200))
+        halo.setWidth(GROSOR_MM * 2.0)
+        halo.setWidthUnit(QgsUnitTypes.RenderMillimeters)
+        sym.insertSymbolLayer(0, halo)
+    except Exception:
+        sym.setWidth(GROSOR_MM)
     categories.append(QgsRendererCategory(valor, sym, etiqueta))
 
 mem_layer.setRenderer(QgsCategorizedSymbolRenderer("status", categories))
@@ -197,6 +223,10 @@ for k in ("OK", "LEFT_FAIL", "RIGHT_FAIL", "BOTH_FAIL"):
 fallas = total - conteo["OK"]
 out()
 out(f"lanelets con alguna falla: {fallas} ({100.0*fallas/total if total else 0:.1f}%)")
-out("Capa 'lanelet_validacion' creada con simbología por estado.")
+if SOLO_FALLAS:
+    out(f"Capa 'lanelet_validacion' creada solo con las {fallas} fallas "
+        f"(los {conteo['OK']} OK se omiten para no tapar los errores).")
+else:
+    out("Capa 'lanelet_validacion' creada con simbología por estado.")
 
 guardar_reporte(lanelet_layer)

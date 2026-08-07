@@ -57,6 +57,11 @@ REFRESCAR_TODO = bool(_p("REFRESCAR_TODO", True))
 INCLUIR_DESTINO = bool(_p("INCLUIR_DESTINO", True))
 MAX_DESTINOS = int(_p("MAX_DESTINOS", 2000))
 ESCRIBIR_INVERSO = bool(_p("ESCRIBIR_INVERSO", True))
+PREFIJO_PROG = "~ "      # marca las capas temporales de progreso
+CAMBIAR_CAPA = bool(_p("CAMBIAR_CAPA_ACTIVA", True))
+HERRAMIENTA_SEL = bool(_p("ACTIVAR_HERRAMIENTA_SEL", True))
+SIMBOLO_HUECO = bool(_p("SIMBOLO_HUECO", True))
+GROSOR_CONTORNO = float(_p("GROSOR_CONTORNO", 0.6))
 
 prj = QgsProject.instance()
 
@@ -74,6 +79,8 @@ REGLAS = [
     ("TRAFFIC_SIGN_POLE",  "TRAFFIC_SIGN_BOX",   "traffic_sign_box_id",   "1:n"),
     ("TRAFFIC_LIGHT_BOX",  "TRAFFIC_LIGHT_BULB", "traffic_light_bulb_id", "1:n"),
     ("TRAFFIC_LIGHT_BOX",  "LANELET",            "lane_id",               "1:n"),
+    # senal de velocidad: un mismo cartel rige todos los lanelet de ese sentido
+    ("TRAFFIC_SIGN_BOX",   "LANELET",            "lane_id",               "1:n"),
     # --- inversas: el origen apunta a UN solo destino
     ("TRAFFIC_LIGHT_POLE", "STOP_LINE",          "stop_line_id",          "n:1"),
     ("TRAFFIC_LIGHT_BOX",  "STOP_LINE",          "stop_line_id",          "n:1"),
@@ -151,6 +158,35 @@ def nid(v):
     return None if s == "" or s.upper() in ("NULL", "NONE") else s
 
 
+class _lienzo_quieto(object):
+    """Detiene y congela el lienzo mientras se toca el arbol de capas.
+
+    Quitar o anadir capas mientras QgsMapRendererCustomPainterJob esta pintando
+    provoca un access violation: el hilo de render sigue usando una capa que ya
+    se destruyo. Congelar el lienzo y esperar a que termine el trabajo en curso
+    elimina la carrera.
+    """
+
+    def __enter__(self):
+        self.cv = None
+        try:
+            self.cv = IFACE.mapCanvas()
+            self.cv.stopRendering()
+            self.cv.freeze(True)
+        except Exception:
+            self.cv = None
+        return self
+
+    def __exit__(self, *a):
+        if self.cv is not None:
+            try:
+                self.cv.freeze(False)
+                self.cv.refresh()
+            except Exception:
+                pass
+        return False
+
+
 def _subgrupo(nombre):
     """Subgrupo propio para cada relacion: se enciende y apaga de una vez."""
     raiz = prj.layerTreeRoot()
@@ -168,26 +204,57 @@ def _limpiar_subgrupo(nombre):
     hijo = padre.findGroup(nombre)
     if hijo is None:
         return
-    for nodo in list(hijo.findLayers()):
-        if nodo.layer() is not None:
-            prj.removeMapLayer(nodo.layer().id())
-    padre.removeChildNode(hijo)
+    with _lienzo_quieto():
+        for nodo in list(hijo.findLayers()):
+            if nodo.layer() is not None:
+                prj.removeMapLayer(nodo.layer().id())
+        padre.removeChildNode(hijo)
 
 
 def _estilo(capa, campo, colores, tam):
-    """Categorias con tamano en mm, para que se vean a cualquier escala."""
+    """Categorias con tamano en mm, para que se vean a cualquier escala.
+
+    Puntos y poligonos se dibujan HUECOS: solo el contorno. Un circulo o un
+    relleno solido encima de un traffic light box o de un pole tapa la entidad
+    real y estorba al seleccionarla; el anillo la rodea y la deja a la vista.
+    """
+    from qgis.core import QgsMarkerSymbol, QgsFillSymbol, QgsMapLayer
     tipo = capa.geometryType()
     cats = []
     for valor, color, etiqueta in colores:
-        sim = QgsSymbol.defaultSymbol(tipo)
-        sim.setColor(QColor(*color))
-        # cada tipo de simbolo expone un metodo distinto; el de relleno ninguno
-        if tipo == QgsWkbTypes.GeometryType.LineGeometry:
-            sim.setWidth(tam)
-        elif tipo == QgsWkbTypes.GeometryType.PointGeometry:
-            sim.setSize(tam)
+        rgb = "%d,%d,%d" % tuple(color[:3])
+        if tipo == QgsWkbTypes.GeometryType.PointGeometry and SIMBOLO_HUECO:
+            sim = QgsMarkerSymbol.createSimple({
+                "name": "circle", "color": "0,0,0,0",
+                "outline_color": rgb,
+                "outline_width": str(GROSOR_CONTORNO), "outline_width_unit": "MM",
+                "size": str(tam * 1.6), "size_unit": "MM"})
+        elif tipo == QgsWkbTypes.GeometryType.PolygonGeometry and SIMBOLO_HUECO:
+            sim = QgsFillSymbol.createSimple({
+                "style": "no", "outline_color": rgb,
+                "outline_width": str(GROSOR_CONTORNO), "outline_width_unit": "MM"})
+        else:
+            sim = QgsSymbol.defaultSymbol(tipo)
+            sim.setColor(QColor(*color))
+            if tipo == QgsWkbTypes.GeometryType.LineGeometry:
+                sim.setWidth(tam)
+            elif tipo == QgsWkbTypes.GeometryType.PointGeometry:
+                sim.setSize(tam)
         cats.append(QgsRendererCategory(valor, sim, etiqueta))
     capa.setRenderer(QgsCategorizedSymbolRenderer(campo, cats))
+    # las capas de progreso son solo visuales: que las herramientas de
+    # identificar y seleccionar no las tomen en cuenta
+    try:
+        # ojo: 'flags() & ~X' devuelve un int y setFlags exige LayerFlags;
+        # antes lanzaba TypeError y el except lo tragaba, asi que la capa
+        # seguia siendo identificable
+        bits = (int(capa.flags())
+                & ~int(QgsMapLayer.LayerFlag.Identifiable)
+                & ~int(QgsMapLayer.LayerFlag.Searchable))
+        capa.setFlags(QgsMapLayer.LayerFlags(bits))
+    except Exception as e:
+        log("  no se pudieron ajustar las banderas de '%s': %s"
+            % (capa.name(), str(e)[:60]))
 
 
 def refrescar_progreso(origen, destino, campo, campo_id, t_o, t_d,
@@ -201,6 +268,10 @@ def refrescar_progreso(origen, destino, campo, campo_id, t_o, t_d,
     cuando la capa no es demasiado grande para que sirva de algo.
     """
     if not PROGRESO:
+        return
+    try:
+        origen.name(), destino.name()      # capas aun vivas?
+    except RuntimeError:
         return
     par = "%s %s %s" % (t_o, "<->" if reciproca else "->", t_d)
     _limpiar_subgrupo(par)
@@ -273,7 +344,7 @@ def refrescar_progreso(origen, destino, campo, campo_id, t_o, t_d,
     grupo = _subgrupo(par)
     capas_creadas = []
 
-    cap = _nueva(txt_o, "estado")
+    cap = _nueva(txt_o, PREFIJO_PROG + "estado")
     fs = []
     for geo, ident, rol, n in filas:
         nf = QgsFeature(campos)
@@ -299,7 +370,7 @@ def refrescar_progreso(origen, destino, campo, campo_id, t_o, t_d,
     capas_creadas.append(cap)
 
     if not mismo_tipo:
-        cd = _nueva("Point", t_d.lower())
+        cd = _nueva("Point", PREFIJO_PROG + t_d.lower())
         fd = []
         for pid, g in asociados:
             nf = QgsFeature(campos)
@@ -318,7 +389,8 @@ def refrescar_progreso(origen, destino, campo, campo_id, t_o, t_d,
         capas_creadas.append(cd)
 
     if vinculos:
-        cl = QgsVectorLayer("LineString?crs=%s" % crs, "vinculos", "memory")
+        cl = QgsVectorLayer("LineString?crs=%s" % crs,
+                            PREFIJO_PROG + "vinculos", "memory")
         fl = []
         for gv in vinculos:
             nf = QgsFeature()
@@ -332,9 +404,10 @@ def refrescar_progreso(origen, destino, campo, campo_id, t_o, t_d,
         cl.renderer().setSymbol(sim)
         capas_creadas.append(cl)
 
-    for c in capas_creadas:
-        prj.addMapLayer(c, False)
-        grupo.addLayer(c)
+    with _lienzo_quieto():
+        for c in capas_creadas:
+            prj.addMapLayer(c, False)
+            grupo.addLayer(c)
 
     n_ok = sum(1 for x in filas if x[2] == "ORIGEN_ASOCIADO")
     extra = "" if mostrar_faltantes else \
@@ -344,10 +417,30 @@ def refrescar_progreso(origen, destino, campo, campo_id, t_o, t_d,
            len(faltantes), extra))
 
 
+def _ids_de_progreso():
+    """Capas que viven dentro del grupo de progreso: nunca son capas de datos."""
+    g = prj.layerTreeRoot().findGroup(GRUPO_PROG)
+    if g is None:
+        return set()
+    return {n.layerId() for n in g.findLayers()}
+
+
 def capas_de_tipo(t):
+    """Capas de datos de ese tipo, excluyendo las temporales de progreso.
+
+    Antes una capa de progreso llamada 'traffic_sign_box' daba el mismo
+    tipo_de() que la capa real TRAFFIC_SIGN_BOX_1784854834 y podia acabar
+    usandose como origen o destino. Ahora llevan prefijo y ademas se descartan
+    por pertenecer al grupo de progreso.
+    """
+    fuera = _ids_de_progreso()
     salida = []
     for l in prj.mapLayers().values():
-        if isinstance(l, QgsVectorLayer) and tipo_de(l.name()) == t:
+        if not isinstance(l, QgsVectorLayer):
+            continue
+        if l.id() in fuera or l.name().startswith(PREFIJO_PROG):
+            continue
+        if tipo_de(l.name()) == t:
             salida.append(l)
     return salida
 
@@ -363,13 +456,14 @@ def vaciar_grupo_progreso():
     if g is None:
         return 0
     n = 0
-    for nodo in list(g.findLayers()):
-        if nodo.layer() is not None:
-            prj.removeMapLayer(nodo.layer().id())
-            n += 1
-    for hijo in list(g.children()):
-        if isinstance(hijo, QgsLayerTreeGroup):
-            g.removeChildNode(hijo)
+    with _lienzo_quieto():
+        for nodo in list(g.findLayers()):
+            if nodo.layer() is not None:
+                prj.removeMapLayer(nodo.layer().id())
+                n += 1
+        for hijo in list(g.children()):
+            if isinstance(hijo, QgsLayerTreeGroup):
+                g.removeChildNode(hijo)
     return n
 
 
@@ -422,6 +516,25 @@ def refrescar_todo():
     log("-" * 70)
 
 
+def activar_capa(cp, papel):
+    """Deja lista la capa sobre la que toca seleccionar en el siguiente paso.
+
+    Sin esto hay que ir al panel de capas entre F2 y F4; como el origen y el
+    destino ya estan fijados en el dialogo, el cambio se puede hacer solo.
+    """
+    if not CAMBIAR_CAPA or cp is None:
+        return
+    try:
+        IFACE.setActiveLayer(cp)
+        if HERRAMIENTA_SEL:
+            acc = IFACE.actionSelect()
+            if acc is not None and not acc.isChecked():
+                acc.trigger()
+        log("  capa activa -> %s (%s)" % (cp.name(), papel))
+    except Exception as e:
+        log("  no se pudo activar '%s': %s" % (cp.name(), str(e)[:70]))
+
+
 class Asociador(object):
     def __init__(self, stop_l, lane_l):
         self.stop_l = stop_l
@@ -446,6 +559,7 @@ class Asociador(object):
             return
         f = sel[0]
         self.stop_fid = f.id()
+        activar_capa(self.lane_l, "destino: selecciona aqui y pulsa %s" % T_ESCR)
         actual = nid(f[CAMPO]) if CAMPO in [x.name() for x in self.stop_l.fields()] else None
         g = QgsGeometry(f.geometry())
         if self.tr_s is not None:
@@ -633,13 +747,20 @@ class Asociador(object):
         self.stop_l.removeSelection()
         self.lane_l.removeSelection()
         self.stop_l.triggerRepaint()
+        activar_capa(self.stop_l, "origen: siguiente %s" % self.t_o)
         _inv = regla_de(self.lane_l.name(), self.stop_l.name())
         _rec = bool(_inv[0]) and self.lane_l.fields().indexOf(_inv[2]) >= 0
-        refrescar_progreso(self.stop_l, self.lane_l, CAMPO, CAMPO_ID,
-                           self.t_o, self.t_d, _rec)
+        # el refresco se aplaza al siguiente ciclo del bucle de eventos: aqui
+        # dentro seguimos en la cascada de senales del commit, con un repintado
+        # recien lanzado, y reconstruir el arbol de capas en ese momento es lo
+        # que provocaba el access violation
+        from qgis.PyQt.QtCore import QTimer
+        QTimer.singleShot(0, lambda: refrescar_progreso(
+            self.stop_l, self.lane_l, CAMPO, CAMPO_ID, self.t_o, self.t_d, _rec))
 
     def cancelar(self):
         self.stop_fid = None
+        activar_capa(self.stop_l, "origen")
         barra("Cancelado.")
 
 
@@ -696,9 +817,19 @@ else:
             % (lane_l.name(), CAMPO_ID,
                ", ".join(x.name() for x in lane_l.fields())))
     globals()["CARD"] = CARD
+    try:
+        # si una corrida anterior murio entre freeze(True) y freeze(False),
+        # el lienzo se queda congelado y parece que las capas desaparecen
+        if IFACE.mapCanvas().isFrozen():
+            IFACE.mapCanvas().freeze(False)
+            IFACE.mapCanvas().refresh()
+            log("  el lienzo estaba congelado; se ha descongelado.")
+    except Exception:
+        pass
     _quitar()
     obj = Asociador(stop_l, lane_l)
     _qu._as_tool = obj
+    activar_capa(stop_l, "origen: selecciona aqui y pulsa %s" % T_STOP)
 
     mw = IFACE.mainWindow()
     ocupadas = {}
@@ -734,6 +865,9 @@ else:
         % (TOL, "si" if AUTOSEL else "no", "anexar" if ANEXAR else "reemplazar"))
     log("  %s tomar origen | %s escribir | Ctrl+Z deshace | Ctrl+S guarda"
         % (T_STOP, T_ESCR))
+    if CAMBIAR_CAPA:
+        log("  la capa activa cambia sola: %s antes de %s, %s antes de %s"
+            % (stop_l.name(), T_STOP, lane_l.name(), T_ESCR))
     if REFRESCAR_TODO:
         refrescar_todo()
     else:

@@ -50,6 +50,18 @@ TECLA_SAL = str(_p("TECLA_SALIDA", "F9"))
 TECLA_GEN = str(_p("TECLA_GENERAR", "F10"))
 COMMIT = bool(_p("COMMIT", True))
 DESACTIVAR = bool(_p("DESACTIVAR", False))
+# --- giro recto: TURNING_LINE + LANELET, ademas del biarco en VIRTUAL_LINE
+CREAR_GIRO = bool(_p("CREAR_GIRO", False))
+TURNING_N = str(_p("CAPA_TURNING", "TURNING_LINE"))
+LANELET_N = str(_p("CAPA_LANELET", "LANELET"))
+UMBRAL_RECTO = float(_p("UMBRAL_RECTO", 20.0))   # grados; por debajo -> straight
+LL_PARTICIPANT = str(_p("LL_PARTICIPANT", "all-vehicles"))
+LL_SURFACE = str(_p("LL_SURFACE", "asphalt"))
+LL_ONE_WAY = str(_p("LL_ONE_WAY", "yes"))
+LL_SUBTYPE = str(_p("LL_SUBTYPE", "road"))
+LL_FUNCTION = str(_p("LL_FUNCTION", "turn"))
+LL_SPEED = str(_p("LL_SPEED", "10mph"))
+GIRO_CREATOR = str(_p("GIRO_CREATOR", "BO_46"))
 
 if isinstance(FUENTES, str):
     FUENTES = [x.strip() for x in FUENTES.split(",") if x.strip()]
@@ -508,8 +520,141 @@ class HerramientaGiro(QgsMapTool):
               % (len(nuevos), nuevos[0][1], nuevos[-1][1],
                  "  |  " + "; ".join(avisos) if avisos else ""),
               Qgis.MessageLevel.Success, 6)
+        if CREAR_GIRO:
+            self.generar_giro_recto(pares)
+
         self.limpiar()
         canvas.refreshAllLayers()
+
+    # ---- giro recto: dos TURNING_LINE + su LANELET
+    @staticmethod
+    def _giro_de(pts):
+        """turn_direction a partir del biarco: signo del giro y angulo total."""
+        if len(pts) < 3:
+            return "straight", 0.0
+        v0 = (pts[1][0] - pts[0][0], pts[1][1] - pts[0][1])
+        v1 = (pts[-1][0] - pts[-2][0], pts[-1][1] - pts[-2][1])
+        cruz = v0[0] * v1[1] - v0[1] * v1[0]
+        punto = v0[0] * v1[0] + v0[1] * v1[1]
+        ang = math.degrees(math.atan2(cruz, punto))
+        if abs(ang) <= UMBRAL_RECTO:
+            return "straight", ang
+        return ("left" if ang > 0 else "right"), ang
+
+    def _siguiente_id(self, cp, extra=0):
+        ids = [int(f["id"]) for f in cp.getFeatures()
+               if f["id"] not in (None, NULL) and int(f["id"]) < 10 ** 7]
+        return ((max(ids) + PASO_ID) if ids else PASO_ID) + extra * PASO_ID
+
+    def _escribir_en(self, cp, feats):
+        """Escribe respetando COMMIT; devuelve la capa realmente usada."""
+        if not COMMIT:
+            tmp, _ = capa_acumulada(cp)
+            ok = tmp.dataProvider().addFeatures(feats)
+            tmp.updateExtents()
+            tmp.triggerRepaint()
+            return (tmp if ok else None)
+        estaba = cp.isEditable()
+        if not estaba:
+            cp.startEditing()
+        if not cp.addFeatures(feats):
+            cp.rollBack(False)
+            return None
+        if not cp.commitChanges(False):
+            for err in cp.commitErrors()[:4]:
+                log("  ERROR %s: %s" % (cp.name(), err))
+            cp.rollBack(False)
+            return None
+        return cp
+
+    def generar_giro_recto(self, pares):
+        tl, ln = capa(TURNING_N), capa(LANELET_N)
+        if tl is None or ln is None:
+            barra("No estan cargadas '%s' y/o '%s'." % (TURNING_N, LANELET_N),
+                  Qgis.MessageLevel.Warning, 6)
+            return
+        lados = {l: (pts, e, sn) for l, pts, _r, e, sn in pares}
+        if "izq" not in lados or "der" not in lados:
+            return
+
+        giro, ang = self._giro_de(lados["izq"][0])
+
+        def recta(a, b, cp):
+            """Segmento de 2 vertices con Z=0: las capas son LineStringZ y una
+            geometria 2D seria rechazada por el proveedor."""
+            g = QgsGeometry.fromPolylineXY([QgsPointXY(*a), QgsPointXY(*b)])
+            g.get().addZValue(0.0)
+            g.transform(QgsCoordinateTransform(self.work, cp.crs(), prj))
+            return g
+
+        # --- las dos TURNING_LINE, en el sentido de circulacion
+        campos_t = tl.fields()
+        nom_t = [f.name() for f in campos_t]
+        ids_t = {}
+        feats_t = []
+        for k, lado in enumerate(("izq", "der")):
+            _pts, e, sn = lados[lado]
+            ident = self._siguiente_id(tl, k)
+            ids_t[lado] = ident
+            f = QgsFeature(campos_t)
+            f.setGeometry(recta(e["pt"], sn["pt"], tl))
+            for nombre, valor in (("id", ident), ("turn_direction", giro),
+                                  ("creator", GIRO_CREATOR)):
+                if nombre in nom_t:
+                    f[nombre] = valor
+            feats_t.append(f)
+        cap_t = self._escribir_en(tl, feats_t)
+        if cap_t is None:
+            barra("No se pudieron escribir las TURNING_LINE.",
+                  Qgis.MessageLevel.Critical, 6)
+            return
+
+        # --- el LANELET: eje recto entre los puntos medios de entrada y salida
+        _p_i, e_i, s_i = lados["izq"]
+        _p_d, e_d, s_d = lados["der"]
+        med_e = ((e_i["pt"][0] + e_d["pt"][0]) / 2.0,
+                 (e_i["pt"][1] + e_d["pt"][1]) / 2.0)
+        med_s = ((s_i["pt"][0] + s_d["pt"][0]) / 2.0,
+                 (s_i["pt"][1] + s_d["pt"][1]) / 2.0)
+        campos_l = ln.fields()
+        nom_l = [f.name() for f in campos_l]
+        id_ll = self._siguiente_id(ln)
+        f = QgsFeature(campos_l)
+        f.setGeometry(recta(med_e, med_s, ln))
+        for nombre, valor in (("id", id_ll),
+                              ("left_line_id", ids_t["izq"]),
+                              ("right_line_id", ids_t["der"]),
+                              ("left_line_type", "turning"),
+                              ("right_line_type", "turning"),
+                              ("participant", LL_PARTICIPANT),
+                              ("surface", LL_SURFACE),
+                              ("one_way", LL_ONE_WAY),
+                              ("subtype", LL_SUBTYPE),
+                              ("function", LL_FUNCTION),
+                              ("speed_limit", LL_SPEED),
+                              ("turn_direction", giro),
+                              ("creator", GIRO_CREATOR)):
+            if nombre in nom_l:
+                f[nombre] = valor
+        cap_l = self._escribir_en(ln, [f])
+        if cap_l is None:
+            barra("Se escribieron las TURNING_LINE pero fallo el LANELET.",
+                  Qgis.MessageLevel.Critical, 8)
+            return
+
+        log("GIRO RECTO en '%s' / '%s':" % (cap_t.name(), cap_l.name()))
+        log("   TURNING_LINE  left id=%d  |  right id=%d"
+            % (ids_t["izq"], ids_t["der"]))
+        log("   LANELET       id=%d  left_line_id=%d  right_line_id=%d"
+            % (id_ll, ids_t["izq"], ids_t["der"]))
+        log("   turn_direction=%s  (angulo %.1f grados, umbral recto %.1f)"
+            % (giro, ang, UMBRAL_RECTO))
+        if giro == "straight":
+            log("   AVISO: angulo por debajo del umbral; revisa si el giro "
+                "realmente es recto.")
+        barra("Giro recto: TURNING_LINE %d/%d + LANELET %d  (%s, %.0f grados)"
+              % (ids_t["izq"], ids_t["der"], id_ll, giro, ang),
+              Qgis.MessageLevel.Success, 7)
 
     @staticmethod
     def sentido(pts):

@@ -68,10 +68,36 @@ REGISTRO = [
  "grupo": "Conversión / 3D",
  "nombre": "3dlayerto2d for labeling",
  "ruta": "scripts/layer3d_a_2d.py",
- "desc": "Crea capa 2D de puntos desde una capa 3D, para etiquetar bien.",
+ "desc": ("Crea una capa 2D desde una capa 3D para etiquetar bien. Acepta "
+          "punto, linea y poligono: los poligonos como traffic_light_box o "
+          "traffic_sign_box se reducen a un punto representativo."),
  "libs": [],
  "params": [
-   {"var": "capa", "tipo": "capa", "etiqueta": "Capa 3D de puntos", "filtro_capa": "punto"},
+   {"var": "capa", "tipo": "capa",
+    "etiqueta": "Capa 3D de entrada (punto, linea o poligono)",
+    "filtro_capa": "vector"},
+   {"var": "SALIDA", "tipo": "opciones",
+    "etiqueta": "Geometria de salida",
+    "valores": ["punto", "misma geometria en 2D"], "default": "punto"},
+   {"var": "METODO", "tipo": "opciones",
+    "etiqueta": "Como reducir lineas y poligonos a punto",
+    "valores": ["punto interior", "centroide"], "default": "punto interior"},
+   {"var": "SOLO_SI_ORIGEN", "tipo": "texto", "opcional": True,
+    "etiqueta": "Aplicar estilo/filtro solo si el origen contiene (vacio = siempre)",
+    "default": "TRAFFIC_SIGN_BOX"},
+   {"var": "ESTILO_DE", "tipo": "capa_nombre", "opcional": True,
+    "filtro_capa": "vector",
+    "etiqueta": "Copiar simbologia y etiquetas de esta capa"},
+   {"var": "COPIAR_FILTRO", "tipo": "bool",
+    "etiqueta": "  copiar tambien su filtro de capa", "default": True},
+   {"var": "ESTILO_QML", "tipo": "archivo", "opcional": True,
+    "etiqueta": "  o cargar un .qml", "filtro": "Estilo QGIS (*.qml)"},
+   {"var": "FILTRO", "tipo": "texto", "opcional": True,
+    "etiqueta": "Filtro de capa (deja vacio para no filtrar)",
+    "default": ""},
+   {"var": "ETIQUETA", "tipo": "texto", "opcional": True,
+    "etiqueta": "Expresion de etiqueta (vacio = sin etiquetas)",
+    "default": ""},
    {"var": "nombre_salida", "tipo": "texto", "etiqueta": "Nombre de salida (vacío = <capa>_2D)", "opcional": True},
  ],
 },
@@ -80,14 +106,50 @@ REGISTRO = [
  "grupo": "Lanelet",
  "nombre": "topologia",
  "ruta": "scripts/topologia.py",
- "desc": "Busca errores topológicos en las capas base de lanelet (gaps, endpoints "
-         "sin snap, colgantes, solapes). Salidas: topology_errors_points_4326 y "
-         "topology_errors_lines_4326. Tolerancias en metros en el CRS de trabajo "
-         "(usa el UTM de tu zona: 32612 Phoenix, 32615 zona 15).",
+ "desc": "Busca errores topologicos (gaps, endpoints sin snap, colgantes, solapes) y clasifica cada solape con un veredicto binario: DUPLICADO cuando los dos lanelets citan las MISMAS dos lineas de borde y la MISMA maniobra, y NO_DUPLICADO en cuanto difiere algo, con el campo 'motivo' indicando que senal delata la diferencia (left_line_id, right_line_id, turn_direction o una combinacion). TURNING_DOBLE marca el artefacto de creacion en que un lanelet tiene turning en sus dos lados. Salidas: topology_errors_points_4326 y topology_errors_lines_4326, ya simbolizadas. Tolerancias en metros en el CRS de trabajo (usa el UTM de tu zona: 32612 Phoenix, 32615 zona 15).",
  "libs": [],
  "params": [
-   {"var": "LAYER_NAMES", "tipo": "lista_texto", "etiqueta": "Capas a revisar (separadas por coma)",
-    "default": "VIRTUAL_LINE, LANE_MARKER, CURBSTONE, TURNING_LINE"},
+   {"var": "LAYER_NAMES", "tipo": "capas_multi", "filtro_capa": "linea",
+    "etiqueta": "Capas a revisar (marca una o varias)",
+    "default": "LANELET"},
+   {"var": "CAMPOS_EXTRA", "tipo": "lista_texto",
+    "etiqueta": "Campos a copiar en la capa de solapes (prefijos src_ y oth_)",
+    "default": "left_line_id, right_line_id, turn_direction"},
+   {"var": "EXCLUIR_DICTAMEN", "tipo": "opciones_multi",
+    "valores": ["DUPLICADO", "NO_DUPLICADO", "TURNING_DOBLE",
+                "SIN_REFERENCIAS"],
+    "default": "NO_DUPLICADO, TURNING_DOBLE",
+    "etiqueta": "Excluir de la salida estos dictamenes (solo aplica a LANELET)"},
+   {"var": "AGRUPAR_DUPLICADOS", "tipo": "bool",
+    "etiqueta": "Agrupar los duplicados en una fila por grupo", "default": True},
+   {"var": "ABRIR_TABLAS", "tipo": "bool",
+    "etiqueta": "Abrir las dos tablas de atributos lado a lado", "default": True},
+   {"var": "GRUPO_SALIDA", "tipo": "texto",
+    "etiqueta": "Grupo donde dejar todas las capas resultantes",
+    "default": "TOPOLOGIA"},
+   {"var": "ANEXO_QC", "tipo": "bool",
+    "etiqueta": "Anexo QC: remapeo, duplicados sobrantes y solapes de capas base",
+    "default": False},
+   {"var": "ANEXO_LANELET", "tipo": "capa_nombre", "filtro_capa": "vector",
+    "etiqueta": "  Anexo: capa LANELET", "patron_nombre": "LANELET"},
+   {"var": "ANEXO_REFERENCIABLES", "tipo": "capas_multi", "filtro_capa": "linea",
+    "etiqueta": "  Anexo: capas referenciables (las cita el lanelet)",
+    "default": "LANE_MARKER,VIRTUAL_LINE,TURNING_LINE"},
+   {"var": "ANEXO_GEOMETRICAS", "tipo": "capas_multi", "filtro_capa": "linea",
+    "etiqueta": "  Anexo: capas geometricas (nunca citadas)",
+    "default": "CURBSTONE,ROAD_EDGE"},
+   {"var": "ANEXO_ID_FIELD", "tipo": "texto", "etiqueta": "  Anexo: campo ID",
+    "default": "id"},
+   {"var": "ANEXO_TOL_LANELET", "tipo": "numero",
+    "etiqueta": "  Anexo: distancia maxima lanelet-linea (m)", "default": 3.5},
+   {"var": "ANEXO_EPS", "tipo": "numero",
+    "etiqueta": "  Anexo: tolerancia de gemelas desplazadas (m)", "default": 0.19},
+   {"var": "ANEXO_RATIO_DUP", "tipo": "numero",
+    "etiqueta": "  Anexo: proporcion minima para considerar duplicado", "default": 0.95},
+   {"var": "ANEXO_MIN_SOLAPE", "tipo": "numero",
+    "etiqueta": "  Anexo: solape minimo para reportar (m)", "default": 0.10},
+   {"var": "ANEXO_GRUPO", "tipo": "texto",
+    "etiqueta": "  Anexo: grupo donde dejar sus capas", "default": "QC_ANEXO"},
    {"var": "WORK_CRS", "tipo": "crs", "etiqueta": "CRS de trabajo (métrico)", "default": "EPSG:32612"},
    {"var": "OUTPUT_CRS", "tipo": "crs", "etiqueta": "CRS de salida", "default": "EPSG:4326"},
  ],
@@ -108,6 +170,10 @@ REGISTRO = [
    {"var": "nombre_turning_line", "tipo": "capa_nombre", "etiqueta": "Capa TURNING_LINE", "filtro_capa": "vector"},
    {"var": "BUFFER_DIST", "tipo": "numero", "etiqueta": "Buffer de verificación", "default": 2.0},
    {"var": "DIST_TOLERANCE", "tipo": "numero", "etiqueta": "Distancia máxima correcta", "default": 2.0},
+   {"var": "GROSOR_MM", "tipo": "numero",
+    "etiqueta": "Grosor de linea en mm", "default": 1.6},
+   {"var": "SOLO_FALLAS", "tipo": "bool",
+    "etiqueta": "Dejar en la capa solo las fallas (ocultar los OK)", "default": True},
    {"var": "OUTPUT_TXT", "tipo": "archivo_salida", "opcional": True,
     "etiqueta": "Reporte TXT (vacío = junto al archivo LANELET)", "filtro": "Texto (*.txt)"},
  ],
@@ -327,6 +393,59 @@ REGISTRO = [
 },
 {
  "grupo": "Lanelet",
+ "nombre": "driveway (virtual line + lanelet, 3 clics)",
+ "ruta": "scripts/driveway_virtual.py",
+ "desc": ("Crea las VIRTUAL_LINE de un driveway y sus LANELET a partir de 3 clics: "
+          "inicio y fin del borde DERECHO de entrada, mas el borde opuesto. Si el "
+          "ancho total supera el umbral genera 3 virtual lines y 2 lanelets "
+          "(one_way=yes); si no, 2 virtual lines y 1 lanelet (one_way=no). Cada "
+          "linea se digitaliza en el sentido del lanelet para el que es la derecha."),
+ "libs": [],
+ "params": [
+   {"var": "CAPA_VIRTUAL", "tipo": "capa_nombre", "filtro_capa": "linea",
+    "etiqueta": "Capa VIRTUAL_LINE", "patron_nombre": "VIRTUAL"},
+   {"var": "CAPA_LANELET", "tipo": "capa_nombre", "filtro_capa": "linea",
+    "etiqueta": "Capa LANELET", "patron_nombre": "LANELET"},
+   {"var": "UMBRAL_ANCHO", "tipo": "numero",
+    "etiqueta": "Ancho total a partir del cual son dos carriles (m)", "default": 6.0},
+   {"var": "REFERENCIA", "tipo": "opciones",
+    "etiqueta": "Que marcan los dos primeros clics",
+    "valores": ["borde derecho", "eje central del driveway"],
+    "default": "borde derecho"},
+   {"var": "SENTIDO_CENTRAL", "tipo": "opciones",
+    "etiqueta": "Sentido de la virtual line central",
+    "valores": ["entrada", "salida"], "default": "entrada"},
+   {"var": "PASO_ID", "tipo": "entero", "etiqueta": "Paso entre ids", "default": 2},
+   {"var": "DW_SPEED", "tipo": "texto",
+    "etiqueta": "lanelet: speed_limit", "default": "15mph"},
+   {"var": "DW_PARTICIPANT", "tipo": "texto",
+    "etiqueta": "lanelet: participant", "default": "all-vehicles"},
+   {"var": "DW_SURFACE", "tipo": "texto",
+    "etiqueta": "lanelet: surface", "default": "asphalt"},
+   {"var": "DW_SUBTYPE", "tipo": "texto",
+    "etiqueta": "lanelet: subtype", "default": "road"},
+   {"var": "DW_TURN", "tipo": "texto",
+    "etiqueta": "lanelet: turn_direction", "default": "straight"},
+   {"var": "DW_FUNCTION", "tipo": "texto", "opcional": True,
+    "etiqueta": "lanelet: function (vacio = NULL, como tus driveways)", "default": ""},
+   {"var": "DW_CREATOR", "tipo": "texto", "etiqueta": "creator", "default": "BO_46"},
+   {"var": "AVISO_DESDE", "tipo": "numero",
+    "etiqueta": "Avisar si el ancho esta entre (m)", "default": 6.0},
+   {"var": "AVISO_HASTA", "tipo": "numero", "etiqueta": "  y (m)", "default": 7.0},
+   {"var": "TECLA_GENERAR", "tipo": "texto",
+    "etiqueta": "Tecla para escribir el driveway completo",
+    "default": "Shift+F11"},
+   {"var": "TECLA_UNA_VIA", "tipo": "texto",
+    "etiqueta": "Tecla para escribir SOLO la entrada (un carril)",
+    "default": "Shift+F12"},
+   {"var": "COMMIT", "tipo": "bool",
+    "etiqueta": "Guardar en disco al escribir", "default": True},
+   {"var": "DESACTIVAR", "tipo": "bool",
+    "etiqueta": "Desactivar y liberar el atajo", "default": False},
+ ],
+},
+{
+ "grupo": "Lanelet",
  "nombre": "spline_giros (atajos F7/F8/Enter)",
  "ruta": "scripts/spline_giros.py",
  "desc": "Dibuja lineas de giro en VIRTUAL_LINE con atajos de teclado. F8 captura los extremos de ENTRADA arrastrando un rectangulo en el lienzo, F9 los de SALIDA, F10 genera. Las teclas son configurables y avisa si chocan con un atajo de QGIS. Los extremos coincidentes (donde una linea termina y empieza la siguiente) se agrupan en un solo nodo, y si sobran se toman los dos mas separados: los bordes del carril. Une izquierda con izquierda y derecha con derecha mediante un BIARCO (dos arcos circulares con tangente comun), tomando la tangente de la linea a la que pertenece cada vertice para que empalme sin quiebre. Solo asigna el id, correlativo continuando el bloque bajo; no toca ningun otro campo.",
@@ -356,6 +475,29 @@ REGISTRO = [
    {"var": "COMMIT", "tipo": "bool",
     "etiqueta": "Guardar en disco al generar (si no, acumula en capa temporal)",
     "default": True},
+   {"var": "CREAR_GIRO", "tipo": "bool",
+    "etiqueta": "Crear tambien TURNING_LINE recta + su LANELET", "default": False},
+   {"var": "CAPA_TURNING", "tipo": "capa_nombre", "filtro_capa": "linea",
+    "etiqueta": "  Capa TURNING_LINE", "patron_nombre": "TURNING"},
+   {"var": "CAPA_LANELET", "tipo": "capa_nombre", "filtro_capa": "linea",
+    "etiqueta": "  Capa LANELET", "patron_nombre": "LANELET"},
+   {"var": "UMBRAL_RECTO", "tipo": "numero",
+    "etiqueta": "  Angulo minimo para no llamarlo 'straight' (grados)",
+    "default": 20.0},
+   {"var": "LL_PARTICIPANT", "tipo": "texto",
+    "etiqueta": "  lanelet: participant", "default": "all-vehicles"},
+   {"var": "LL_SURFACE", "tipo": "texto",
+    "etiqueta": "  lanelet: surface", "default": "asphalt"},
+   {"var": "LL_ONE_WAY", "tipo": "texto",
+    "etiqueta": "  lanelet: one_way", "default": "yes"},
+   {"var": "LL_SUBTYPE", "tipo": "texto",
+    "etiqueta": "  lanelet: subtype", "default": "road"},
+   {"var": "LL_FUNCTION", "tipo": "texto",
+    "etiqueta": "  lanelet: function", "default": "turn"},
+   {"var": "LL_SPEED", "tipo": "texto",
+    "etiqueta": "  lanelet: speed_limit", "default": "10mph"},
+   {"var": "GIRO_CREATOR", "tipo": "texto",
+    "etiqueta": "  creator para turning y lanelet", "default": "BO_46"},
    {"var": "DESACTIVAR", "tipo": "bool",
     "etiqueta": "Desactivar la herramienta y liberar los atajos",
     "default": False},
@@ -408,6 +550,16 @@ REGISTRO = [
     "default": True},
    {"var": "INCLUIR_DESTINO", "tipo": "bool",
     "etiqueta": "Incluir capa de destinos sin asociar", "default": True},
+   {"var": "CAMBIAR_CAPA_ACTIVA", "tipo": "bool",
+    "etiqueta": "Cambiar sola la capa activa: origen antes de F2, destino antes de F4",
+    "default": True},
+   {"var": "ACTIVAR_HERRAMIENTA_SEL", "tipo": "bool",
+    "etiqueta": "  y activar la herramienta de seleccion", "default": True},
+   {"var": "SIMBOLO_HUECO", "tipo": "bool",
+    "etiqueta": "Simbolos huecos en puntos y poligonos (no tapan la entidad)",
+    "default": True},
+   {"var": "GROSOR_CONTORNO", "tipo": "numero",
+    "etiqueta": "Grosor del contorno en mm", "default": 0.6},
    {"var": "MAX_DESTINOS", "tipo": "entero",
     "etiqueta": "Limite de destinos para dibujar los faltantes", "default": 2000},
    {"var": "DESACTIVAR", "tipo": "bool",
@@ -587,6 +739,33 @@ def crear_widget(spec):
         cont._combo, cont._fw = combo, fw  # refs vivas
         return cont, lambda: {"modo": CLAVES_MODO[combo.currentIndex()],
                               "carpeta": fw.filePath().strip() or None}
+
+    if tipo in ("opciones_multi", "capas_multi"):
+        # lista con casillas: varias opciones marcables sin escribir a mano
+        w = QgsCheckableComboBox()
+        if tipo == "capas_multi":
+            filtro = spec.get("filtro_capa")
+            vals = []
+            for l in QgsProject.instance().mapLayers().values():
+                if not isinstance(l, QgsVectorLayer):
+                    continue
+                if filtro == "linea" and l.geometryType() != 1:
+                    continue
+                if filtro == "punto" and l.geometryType() != 0:
+                    continue
+                if filtro == "poligono" and l.geometryType() != 2:
+                    continue
+                vals.append(l.name())
+            vals = sorted(set(vals))
+        else:
+            vals = [str(x) for x in (spec.get("valores") or [])]
+        w.addItems(vals)
+        d = spec.get("default")
+        if d:
+            if isinstance(d, str):
+                d = [x.strip() for x in d.split(",") if x.strip()]
+            w.setCheckedItems([x for x in d if x in vals])
+        return w, lambda: w.checkedItems()
 
     if tipo == "opciones":
         # desplegable con valores fijos; evita tener que escribir a mano
